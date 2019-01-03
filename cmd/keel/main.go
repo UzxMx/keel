@@ -149,12 +149,14 @@ func main() {
 	t := &k8s.Translator{
 		FieldLogger: log.WithField("context", "translator"),
 	}
+	t.RegisterObserver(implementer)
 
 	buf := k8s.NewBuffer(&g, t, log.StandardLogger(), 128)
 	wl := log.WithField("context", "watch")
 	k8s.WatchDeployments(&g, implementer.Client(), wl, buf)
 	k8s.WatchStatefulSets(&g, implementer.Client(), wl, buf)
 	k8s.WatchDaemonSets(&g, implementer.Client(), wl, buf)
+	k8s.WatchJobs(&g, implementer.Client(), wl, buf)
 	k8s.WatchCronJobs(&g, implementer.Client(), wl, buf)
 
 	approvalsCache := memory.NewMemoryCache()

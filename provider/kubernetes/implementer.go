@@ -2,10 +2,12 @@ package kubernetes
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/keel-hq/keel/internal/k8s"
 
 	apps_v1 "k8s.io/api/apps/v1"
+	batch_v1 "k8s.io/api/batch/v1"
 	v1beta1 "k8s.io/api/batch/v1beta1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -41,8 +43,10 @@ type Implementer interface {
 // KubernetesImplementer - default kubernetes client implementer, uses
 // https://github.com/kubernetes/client-go v3.0.0-beta.0
 type KubernetesImplementer struct {
-	cfg    *rest.Config
-	client *kubernetes.Clientset
+	mu          sync.Mutex
+	cfg         *rest.Config
+	client      *kubernetes.Clientset
+	pendingJobs []*batch_v1.Job
 }
 
 // Opts - implementer options, usually for k8s deployments
@@ -125,6 +129,9 @@ func (i *KubernetesImplementer) Update(obj *k8s.GenericResource) error {
 	// })
 	// return retryErr
 
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
 	switch resource := obj.GetResource().(type) {
 	case *apps_v1.Deployment:
 		_, err := i.client.Apps().Deployments(resource.Namespace).Update(resource)
@@ -140,6 +147,21 @@ func (i *KubernetesImplementer) Update(obj *k8s.GenericResource) error {
 		_, err := i.client.Apps().DaemonSets(resource.Namespace).Update(resource)
 		if err != nil {
 			return err
+		}
+	case *batch_v1.Job:
+		if resource.Status.CompletionTime != nil {
+			policy := meta_v1.DeletePropagationBackground
+			err := i.client.BatchV1().Jobs(resource.Namespace).Delete(resource.Name, &meta_v1.DeleteOptions{
+				PropagationPolicy: &policy,
+			})
+			if err != nil {
+				log.Info("Delete error")
+				return err
+			}
+			delete(resource.Spec.Template.ObjectMeta.Labels, "controller-uid")
+			resource.Spec.Selector = nil
+			resource.ObjectMeta.ResourceVersion = ""
+			i.pendingJobs = append(i.pendingJobs, resource)
 		}
 	case *v1beta1.CronJob:
 		_, err := i.client.BatchV1beta1().CronJobs(resource.Namespace).Update(resource)
@@ -171,4 +193,35 @@ func (i *KubernetesImplementer) DeletePod(namespace, name string, opts *meta_v1.
 // ConfigMaps - returns an interface to config maps for a specified namespace
 func (i *KubernetesImplementer) ConfigMaps(namespace string) core_v1.ConfigMapInterface {
 	return i.client.Core().ConfigMaps(namespace)
+}
+
+func (i *KubernetesImplementer) OnAdd(gr *k8s.GenericResource) {
+}
+
+func (i *KubernetesImplementer) OnUpdate(gr *k8s.GenericResource) {
+}
+
+func (i *KubernetesImplementer) OnDelete(gr *k8s.GenericResource) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if resource, ok := gr.GetResource().(*batch_v1.Job); ok {
+		for idx, job := range i.pendingJobs {
+			if job.Namespace == resource.Namespace && job.Name == resource.Name {
+				_, err := i.client.BatchV1().Jobs(job.Namespace).Create(job)
+				if err != nil {
+					log.WithFields(log.Fields{
+						"error": err,
+					}).Error("Failed to create job")
+				} else {
+					log.WithFields(log.Fields{
+						"namespace": job.Namespace,
+						"name":      job.Name,
+					}).Info("Job created")
+				}
+				i.pendingJobs = append(i.pendingJobs[:idx], i.pendingJobs[idx+1:]...)
+				return
+			}
+		}
+	}
 }

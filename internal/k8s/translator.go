@@ -4,12 +4,20 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+type Observer interface {
+	OnAdd(gr *GenericResource)
+	OnUpdate(gr *GenericResource)
+	OnDelete(gr *GenericResource)
+}
+
 type Translator struct {
 	logrus.FieldLogger
 
 	GenericResourceCache
 
 	KeelSelector string
+
+	observer Observer
 }
 
 func (t *Translator) OnAdd(obj interface{}) {
@@ -20,6 +28,9 @@ func (t *Translator) OnAdd(obj interface{}) {
 	}
 	t.Debugf("added %s %s", gr.Kind(), gr.Name)
 	t.GenericResourceCache.Add(gr)
+	if t.observer != nil {
+		t.observer.OnAdd(gr)
+	}
 }
 
 func (t *Translator) OnUpdate(oldObj, newObj interface{}) {
@@ -30,6 +41,9 @@ func (t *Translator) OnUpdate(oldObj, newObj interface{}) {
 	}
 	t.Debugf("updated %s %s", gr.Kind(), gr.Name)
 	t.GenericResourceCache.Add(gr)
+	if t.observer != nil {
+		t.observer.OnUpdate(gr)
+	}
 }
 
 func (t *Translator) OnDelete(obj interface{}) {
@@ -40,4 +54,11 @@ func (t *Translator) OnDelete(obj interface{}) {
 	}
 	t.Debugf("deleted %s %s", gr.Kind(), gr.Name)
 	t.GenericResourceCache.Remove(gr.GetIdentifier())
+	if t.observer != nil {
+		t.observer.OnDelete(gr)
+	}
+}
+
+func (t *Translator) RegisterObserver(observer Observer) {
+	t.observer = observer
 }
